@@ -6,8 +6,84 @@
 #include <QStringList>
 #include <QCoreApplication>
 #include <QRegularExpression>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QJsonValue>
+#include <QSet>
+#include <QFileInfo>
+#include <functional>
+#include <utility>
 
 SystemWorker::SystemWorker(QObject *parent) : QObject(parent) {}
+
+static QString targetStateFilePath()
+{
+    return QStringLiteral("/tmp/archaid-target.json");
+}
+
+struct TargetMountState {
+    QString root;
+    QString esp;
+};
+
+static TargetMountState readTargetMountState()
+{
+    TargetMountState state;
+    QFile f(targetStateFilePath());
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return state;
+
+    const QByteArray raw = f.readAll();
+    f.close();
+
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(raw, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return state;
+
+    const QJsonObject obj = doc.object();
+    state.root = obj.value(QStringLiteral("root")).toString();
+    state.esp  = obj.value(QStringLiteral("esp")).toString();
+    return state;
+}
+
+static void writeTargetMountState(const QString &rootDev, const QString &espDev)
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("root"), rootDev);
+    if (!espDev.isEmpty())
+        obj.insert(QStringLiteral("esp"), espDev);
+
+    QFile f(targetStateFilePath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        return;
+
+    const QJsonDocument doc(obj);
+    f.write(doc.toJson(QJsonDocument::Compact));
+    f.write("\n");
+    f.close();
+}
+
+static QString currentMountSource(const QString &path)
+{
+    QProcess proc;
+    proc.start("findmnt", {"-rn", "-o", "SOURCE", path});
+    if (!proc.waitForFinished(-1) || proc.exitCode() != 0)
+        return QString();
+    return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+}
+
+static QString canonicalDevice(const QString &dev)
+{
+    if (dev.isEmpty())
+        return QString();
+    QFileInfo fi(dev);
+    if (fi.exists())
+        return fi.canonicalFilePath();
+    return dev;
+}
 
 // Trim decorations and ensure a canonical /dev/... partition path
 static QString normalizePartitionPath(QString any)
@@ -37,6 +113,250 @@ QString SystemWorker::normalizePartitionPath(const QString &in) const
     return s;
 }
 
+bool SystemWorker::isMountPoint(const QString &path)
+{
+    QProcess proc;
+    proc.start("findmnt", {"-rn", path});
+    if (!proc.waitForFinished(-1))
+        return false;
+    return proc.exitCode() == 0;
+}
+
+bool SystemWorker::ensureTargetMounts()
+{
+    const QString disk = drive.startsWith("/dev/") ? drive : QStringLiteral("/dev/%1").arg(drive);
+    if (disk.size() <= 5) {
+        emit errorOccurred("Invalid target drive specified for installation.");
+        return false;
+    }
+
+    TargetMountState recorded = readTargetMountState();
+
+    auto ensureDir = [](const QString &path) {
+        QDir().mkpath(path);
+    };
+
+    auto remountIfMismatch = [&](const QString &mountPoint, const QString &expectedDev) {
+        if (expectedDev.isEmpty())
+            return;
+        if (!isMountPoint(mountPoint))
+            return;
+        const QString current = currentMountSource(mountPoint);
+        if (current.isEmpty())
+            return;
+        if (canonicalDevice(current) != canonicalDevice(expectedDev)) {
+            emit logMessage(QStringLiteral("%1 is mounted from %2 but prepared target is %3. Remounting…")
+                                .arg(mountPoint, current, expectedDev));
+            QProcess::execute("sudo", {"umount", "-Rl", mountPoint});
+        }
+    };
+
+    ensureDir("/mnt");
+    remountIfMismatch("/mnt", recorded.root);
+
+    if (!isMountPoint("/mnt") && !recorded.root.isEmpty()) {
+        emit logMessage(QStringLiteral("Mounting prepared root partition %1 at /mnt…").arg(recorded.root));
+        if (QProcess::execute("sudo", {"mount", recorded.root, "/mnt"}) != 0)
+            emit logMessage(QStringLiteral("Failed to mount recorded root partition %1. Falling back to autodetection.")
+                                .arg(recorded.root));
+    }
+
+    struct PartitionInfo {
+        QString name;
+        QString fstype;
+        QString flags;
+        QString mountpoint;
+        qulonglong size = 0;
+    };
+
+    QList<PartitionInfo> partitions;
+    bool partitionsLoaded = false;
+
+    auto loadPartitions = [&]() -> bool {
+        if (partitionsLoaded)
+            return true;
+
+        QString out;
+        if (!runCommandCapture(
+                QStringLiteral("lsblk -J -b -o NAME,TYPE,FSTYPE,SIZE,PARTFLAGS,MOUNTPOINT %1").arg(disk),
+                &out))
+            return false;
+
+        QJsonParseError parseError{};
+        const QJsonDocument doc = QJsonDocument::fromJson(out.toUtf8(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit errorOccurred(QStringLiteral("Failed to parse lsblk output for %1: %2")
+                                   .arg(disk, parseError.errorString()));
+            return false;
+        }
+
+        const QJsonArray devices = doc.object().value(QStringLiteral("blockdevices")).toArray();
+        if (devices.isEmpty()) {
+            emit errorOccurred(QStringLiteral("No block devices found in lsblk output for %1.").arg(disk));
+            return false;
+        }
+
+        partitions.clear();
+        std::function<void(const QJsonObject &)> walk = [&](const QJsonObject &obj) {
+            const QString type = obj.value(QStringLiteral("type")).toString();
+            const QString name = obj.value(QStringLiteral("name")).toString();
+            const QString fstype = obj.value(QStringLiteral("fstype")).toString();
+            const QString flags = obj.value(QStringLiteral("partflags")).toString();
+            const QString mountpoint = obj.value(QStringLiteral("mountpoint")).toString();
+            const qulonglong size = obj.value(QStringLiteral("size")).toVariant().toULongLong();
+
+            if (type == QLatin1String("part") && !name.isEmpty()) {
+                PartitionInfo p;
+                p.name = name;
+                p.fstype = fstype;
+                p.flags = flags;
+                p.mountpoint = mountpoint;
+                p.size = size;
+                partitions.append(p);
+            }
+
+            const QJsonArray children = obj.value(QStringLiteral("children")).toArray();
+            for (const QJsonValue &childVal : children) {
+                if (childVal.isObject())
+                    walk(childVal.toObject());
+            }
+        };
+
+        for (const QJsonValue &val : devices) {
+            if (val.isObject())
+                walk(val.toObject());
+        }
+
+        if (partitions.isEmpty()) {
+            emit errorOccurred(QStringLiteral("No partitions detected on %1.").arg(disk));
+            return false;
+        }
+
+        partitionsLoaded = true;
+        return true;
+    };
+
+    auto hasFlag = [](const QString &flags, const QString &needle) {
+        return flags.contains(needle, Qt::CaseInsensitive);
+    };
+
+    auto mountRootFromPartitions = [&]() -> bool {
+        if (isMountPoint("/mnt"))
+            return true;
+        if (!loadPartitions())
+            return false;
+
+        const QSet<QString> rootFsTypes = {"ext4", "btrfs", "xfs", "f2fs", "jfs", "reiserfs"};
+        PartitionInfo rootCandidate;
+        for (const PartitionInfo &p : std::as_const(partitions)) {
+            const QString fs = p.fstype.toLower();
+            if (!rootFsTypes.contains(fs))
+                continue;
+            if (hasFlag(p.flags, QStringLiteral("esp")) || hasFlag(p.flags, QStringLiteral("bios_grub")))
+                continue;
+            if (rootCandidate.name.isEmpty() || p.size > rootCandidate.size)
+                rootCandidate = p;
+        }
+
+        if (rootCandidate.name.isEmpty()) {
+            emit errorOccurred(QStringLiteral("Unable to determine target root partition on %1.").arg(disk));
+            return false;
+        }
+
+        const QString rootDev = rootCandidate.name.startsWith("/dev/")
+                                    ? rootCandidate.name
+                                    : QStringLiteral("/dev/%1").arg(rootCandidate.name);
+
+        emit logMessage(QStringLiteral("Mounting %1 at /mnt…").arg(rootDev));
+        if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) {
+            emit errorOccurred(QStringLiteral("Failed to mount %1 at /mnt.").arg(rootDev));
+            return false;
+        }
+
+        writeTargetMountState(rootDev, QString());
+        return true;
+    };
+
+    if (!isMountPoint("/mnt")) {
+        emit logMessage("Target root is not mounted. Attempting to locate and mount it automatically…");
+        if (!mountRootFromPartitions())
+            return false;
+    }
+
+    if (!isMountPoint("/mnt")) {
+        emit errorOccurred("/mnt is not a valid mountpoint even after attempting to mount the root partition.");
+        return false;
+    }
+
+    if (!useEfi) {
+        const QString currentRoot = currentMountSource("/mnt");
+        if (!currentRoot.isEmpty())
+            writeTargetMountState(currentRoot, QString());
+        return true;
+    }
+
+    ensureDir("/mnt/boot/efi");
+    remountIfMismatch("/mnt/boot/efi", recorded.esp);
+
+    if (!isMountPoint("/mnt/boot/efi") && !recorded.esp.isEmpty()) {
+        emit logMessage(QStringLiteral("Mounting prepared EFI System Partition %1 at /mnt/boot/efi…").arg(recorded.esp));
+        if (QProcess::execute("sudo", {"mount", recorded.esp, "/mnt/boot/efi"}) != 0)
+            emit logMessage(QStringLiteral("Failed to mount recorded ESP %1. Falling back to autodetection.").arg(recorded.esp));
+    }
+
+    auto mountEspFromPartitions = [&]() -> bool {
+        if (isMountPoint("/mnt/boot/efi"))
+            return true;
+        if (!loadPartitions())
+            return false;
+
+        PartitionInfo espCandidate;
+        for (const PartitionInfo &p : std::as_const(partitions)) {
+            const QString flags = p.flags;
+            const QString fs = p.fstype.toLower();
+            const bool looksEsp = hasFlag(flags, QStringLiteral("esp")) || fs == "vfat" || fs == "fat32" || fs == "fat";
+            if (!looksEsp)
+                continue;
+            if (espCandidate.name.isEmpty() || hasFlag(flags, QStringLiteral("esp")) || p.size < espCandidate.size) {
+                espCandidate = p;
+                if (hasFlag(flags, QStringLiteral("esp")))
+                    break;
+            }
+        }
+
+        if (espCandidate.name.isEmpty()) {
+            emit errorOccurred(QStringLiteral("EFI installation requested, but no EFI System Partition was found on %1.").arg(disk));
+            return false;
+        }
+
+        const QString espDev = espCandidate.name.startsWith("/dev/")
+                                   ? espCandidate.name
+                                   : QStringLiteral("/dev/%1").arg(espCandidate.name);
+
+        emit logMessage(QStringLiteral("Mounting EFI System Partition %1 at /mnt/boot/efi…").arg(espDev));
+        if (QProcess::execute("sudo", {"mount", espDev, "/mnt/boot/efi"}) != 0) {
+            emit errorOccurred(QStringLiteral("Failed to mount EFI System Partition %1 at /mnt/boot/efi.").arg(espDev));
+            return false;
+        }
+
+        const QString currentRoot = currentMountSource("/mnt");
+        writeTargetMountState(currentRoot, espDev);
+        return true;
+    };
+
+    if (!mountEspFromPartitions())
+        return false;
+
+    if (!isMountPoint("/mnt/boot/efi")) {
+        emit errorOccurred("/mnt/boot/efi is not mounted after attempting to attach the EFI System Partition.");
+        return false;
+    }
+
+    const QString currentRoot = currentMountSource("/mnt");
+    const QString currentEsp = currentMountSource("/mnt/boot/efi");
+    writeTargetMountState(currentRoot, currentEsp);
+    return true;
+}
 void SystemWorker::setParameters(const QString &drv,
                                  const QString &user,
                                  const QString &pass,
@@ -462,6 +782,9 @@ bool SystemWorker::generateGrubWithOsProber()
 void SystemWorker::run() {
     emit logMessage("\xF0\x9F\x9A\x80 Starting system installation...");
 
+    if (!ensureTargetMounts())
+        return;
+
     QString isoPath = "/mnt/archlinux.iso";
     if (!QFile::exists(isoPath)) {
         QString tmpIso = QDir::tempPath() + "/archlinux.iso";
@@ -489,6 +812,15 @@ void SystemWorker::run() {
 
     runCommand("sudo rm -f /mnt/etc/resolv.conf");
     runCommand("sudo cp /etc/resolv.conf /mnt/etc/resolv.conf");
+
+    runCommand(
+        "sudo arch-chroot /mnt bash -lc \"set -e; "
+        "for d in /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; do "
+        "  if [ -L \\\"$d\\\" ] || { [ -e \\\"$d\\\" ] && [ ! -d \\\"$d\\\" ]; }; then rm -rf \\\"$d\\\"; fi; "
+        "done; "
+        "mkdir -p /var/cache/pacman/pkg /var/lib/pacman/sync; "
+        "chown root:root /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; "
+        "chmod 0755 /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync;\"");
 
     if (!QFile::exists("/mnt/usr/bin/pacman")) {
     QString mirrorUrl = customMirrorUrl;

@@ -10,6 +10,8 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QChar>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "Installwizard.h"
 
 // --- Helper to locate parted ---
@@ -21,6 +23,30 @@ static QString locatePartedBinary() {
         if (QFileInfo::exists(path))
             return path;
     return QString();
+}
+
+static QString targetStateFilePath()
+{
+    return QStringLiteral("/tmp/archaid-target.json");
+}
+
+static void recordTargetMountState(const QString &rootDev, const QString &espDev)
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("root"), rootDev);
+    if (!espDev.isEmpty())
+        obj.insert(QStringLiteral("esp"), espDev);
+
+    QFile f(targetStateFilePath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        qWarning() << "Failed to persist target mount state:" << f.errorString();
+        return;
+    }
+
+    const QJsonDocument doc(obj);
+    f.write(doc.toJson(QJsonDocument::Compact));
+    f.write("\n");
+    f.close();
 }
 
 // Return child partition kernel names for devPath (e.g. "sdb1", "nvme0n1p2")
@@ -127,6 +153,38 @@ static QString findExistingEsp(const QString &partedBin, const QString &devPath)
     }
 
     return QString(); // none found
+}
+
+// Find an existing bios_grub partition (GPT BIOS boot partition) on this disk.
+// Returns full /dev/… path or empty string if none is present.
+static QString findExistingBiosGrub(const QString &partedBin, const QString &devPath)
+{
+    QProcess p;
+    p.start("sudo", QStringList{partedBin, devPath, "-m", "unit", "MiB", "print"});
+    p.waitForFinished();
+    const QStringList lines = QString::fromUtf8(p.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+
+    QString base = devPath.startsWith("/dev/") ? devPath.mid(5) : devPath;
+
+    for (const QString &line : lines) {
+        const QStringList cols = line.split(':');
+        if (cols.size() < 7)
+            continue;
+
+        const QString number = cols.at(0);
+        if (number.isEmpty() || !number[0].isDigit())
+            continue;
+
+        const QString flags = cols.at(6).toLower();
+        if (flags.contains("bios_grub")) {
+            bool ok = false;
+            const int idx = number.toInt(&ok);
+            if (ok)
+                return partitionNodeFor(base, idx);
+        }
+    }
+
+    return QString();
 }
 
 // Return the base kernel name for /dev/sdX or /dev/nvme0n1
@@ -491,6 +549,7 @@ void InstallerWorker::wipeDriveAndPartition(QProcess &process, const QString &pa
         QProcess::execute("sudo", {"mount", rootPart, "/mnt"});
         QProcess::execute("sudo", {"mkdir", "-p", "/mnt/boot/efi"});
         QProcess::execute("sudo", {"mount", espPart, "/mnt/boot/efi"});
+        recordTargetMountState(rootPart, espPart);
         emit installComplete();
         return;
     } else {
@@ -546,6 +605,7 @@ void InstallerWorker::wipeDriveAndPartition(QProcess &process, const QString &pa
 
         emit logMessage("Mounting root partition...");
         QProcess::execute("sudo", {"mount", rootPart, "/mnt"});
+        recordTargetMountState(rootPart, QString());
         emit installComplete();
         return;
     }
@@ -658,6 +718,8 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
                 return;
             }
 
+            recordTargetMountState(rootPart, espPart);
+
             emit installComplete();
             return;
         }
@@ -707,15 +769,86 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
         QProcess::execute("sudo", {"mkdir", "-p", "/mnt/boot/efi"});
         QProcess::execute("sudo", {"mount", espPart, "/mnt/boot/efi"});
 
+        recordTargetMountState(rootPart, espPart);
+
         emit installComplete();
         return;
 
     } else {
-        // Legacy: create root only, detect by diff
-        const QSet<QString> before = childPartitionsSet(devPath);
+        const QString existingBios = findExistingBiosGrub(partedBin, devPath);
+        if (!existingBios.isEmpty()) {
+            emit logMessage(QString("Found existing bios_grub partition: %1").arg(existingBios));
 
-        const QString rootStart = QString::number(startMiB) + "MiB";
+            const QSet<QString> before = childPartitionsSet(devPath);
+
+            const QString rootStart = QString::number(startMiB) + "MiB";
+            const QString rootEnd   = QString::number(endMiB - 1) + "MiB";
+            if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", "ext4", rootStart, rootEnd}) != 0) {
+                emit errorOccurred("Failed to create root (existing partition).");
+                return;
+            }
+            QProcess::execute("sudo", {"partprobe", devPath});
+            QProcess::execute("sudo", {"udevadm", "settle"});
+            QThread::sleep(1);
+
+            const QString rootDev = detectNewPartitionNode(devPath, before);
+            if (rootDev.isEmpty()) { emit errorOccurred("Could not uniquely detect new root partition."); return; }
+
+            if (QProcess::execute("sudo", {"mkfs.ext4", "-F", rootDev}) != 0) { emit errorOccurred("Failed to format root."); return; }
+            QProcess::execute("sudo", {"e2fsck", "-f", rootDev});
+
+            emit logMessage("Mounting root partition...");
+            if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) { emit errorOccurred("Failed to mount root at /mnt."); return; }
+
+            recordTargetMountState(rootDev, QString());
+
+            emit installComplete();
+            return;
+        }
+
+        // No bios_grub present -> carve one from the freed region before creating root
+        const long long biosEndMiB = startMiB + 2; // reserve ~2MiB for bios_grub like the wipe path
+        if (biosEndMiB >= endMiB) {
+            emit errorOccurred("Selected partition is too small to host bios_grub and root partitions.");
+            return;
+        }
+
+        const QString biosStart = QString::number(startMiB) + "MiB";
+        const QString biosEnd   = QString::number(biosEndMiB) + "MiB";
+        const QSet<QString> beforeBios = childPartitionsSet(devPath);
+        if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", biosStart, biosEnd}) != 0) {
+            emit errorOccurred("Failed to create bios_grub partition.");
+            return;
+        }
+        QProcess::execute("sudo", {"partprobe", devPath});
+        QProcess::execute("sudo", {"udevadm", "settle"});
+        QThread::sleep(1);
+
+        const QString biosPart = detectNewPartitionNode(devPath, beforeBios);
+        if (biosPart.isEmpty()) {
+            emit errorOccurred("Could not detect newly created bios_grub partition.");
+            return;
+        }
+        const QString biosNum = partitionNumberFromPath(biosPart);
+        if (biosNum.isEmpty()) {
+            emit errorOccurred("Could not determine bios_grub partition number.");
+            return;
+        }
+        if (QProcess::execute("sudo", {partedBin, devPath, "--script", "set", biosNum, "bios_grub", "on"}) != 0) {
+            emit errorOccurred("Failed to flag bios_grub partition.");
+            return;
+        }
+        emit logMessage(QString("Created bios_grub partition: %1").arg(biosPart));
+
+        const long long rootStartMiB = biosEndMiB;
+        if (endMiB <= rootStartMiB + 1) {
+            emit errorOccurred("Remaining space after bios_grub is insufficient for root partition.");
+            return;
+        }
+
+        const QString rootStart = QString::number(rootStartMiB) + "MiB";
         const QString rootEnd   = QString::number(endMiB - 1) + "MiB";
+        const QSet<QString> beforeRoot = childPartitionsSet(devPath);
         if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", "ext4", rootStart, rootEnd}) != 0) {
             emit errorOccurred("Failed to create root (existing partition).");
             return;
@@ -724,14 +857,25 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
         QProcess::execute("sudo", {"udevadm", "settle"});
         QThread::sleep(1);
 
-        const QString rootDev = detectNewPartitionNode(devPath, before);
-        if (rootDev.isEmpty()) { emit errorOccurred("Could not uniquely detect new root partition."); return; }
+        const QString rootDev = detectNewPartitionNode(devPath, beforeRoot);
+        if (rootDev.isEmpty()) {
+            emit errorOccurred("Could not uniquely detect new root partition.");
+            return;
+        }
 
-        if (QProcess::execute("sudo", {"mkfs.ext4", "-F", rootDev}) != 0) { emit errorOccurred("Failed to format root."); return; }
+        if (QProcess::execute("sudo", {"mkfs.ext4", "-F", rootDev}) != 0) {
+            emit errorOccurred("Failed to format root.");
+            return;
+        }
         QProcess::execute("sudo", {"e2fsck", "-f", rootDev});
 
         emit logMessage("Mounting root partition...");
-        if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) { emit errorOccurred("Failed to mount root at /mnt."); return; }
+        if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) {
+            emit errorOccurred("Failed to mount root at /mnt.");
+            return;
+        }
+
+        recordTargetMountState(rootDev, QString());
 
         emit installComplete();
         return;
@@ -969,6 +1113,8 @@ void InstallerWorker::run() {
         return;
     }
 
+    QFile::remove(targetStateFilePath());
+
     QString devPath = QString("/dev/%1").arg(selectedDrive);
     emit logMessage(QString("efiInstall = %1").arg(efiInstall ? "true" : "false"));
 
@@ -1056,6 +1202,8 @@ void InstallerWorker::run() {
             QProcess::execute("sudo", {"mkdir", "-p", "/mnt/boot/efi"});
             QProcess::execute("sudo", {"mount", espPart, "/mnt/boot/efi"});
         }
+
+        recordTargetMountState(rootPart, efiInstall ? espPart : QString());
 
         emit installComplete();
         return;
