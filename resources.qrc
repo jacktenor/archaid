@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/img">
+        <file alias="arch_spin.gif">res/arch_spin.gif</file>
+            <file alias="app.ico">res/app.ico</file>
+    </qresource>
+</RCC>

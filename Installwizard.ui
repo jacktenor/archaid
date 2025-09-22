@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Installwizard</class>
+ <widget class="QWizard" name="Installwizard">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>500</width>
+    <height>420</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>500</width>
+    <height>420</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>500</width>
+    <height>420</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>Installwizard</string>
+  </property>
+  <property name="wizardStyle">
+   <enum>QWizard::WizardStyle::ClassicStyle</enum>
+  </property>
+  <widget class="QWizardPage" name="wizardPage">
+   <widget class="QLabel" name="label">
+    <property name="geometry">
+     <rect>
+      <x>90</x>
+      <y>8</y>
+      <width>301</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Noto Sans</family>
+      <pointsize>11</pointsize>
+      <italic>false</italic>
+      <fontweight>DemiBold</fontweight>
+     </font>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">font: 600 11pt &quot;Noto Sans&quot;;</string>
+    </property>
+    <property name="text">
+     <string>Download the latest Arch Linux ISO</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignmentFlag::AlignCenter</set>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="downloadButton">
+    <property name="geometry">
+     <rect>
+      <x>192</x>
+      <y>96</y>
+      <width>100</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Download</string>
+    </property>
+   </widget>
+   <widget class="QProgressBar" name="progressBar">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>168</y>
+      <width>420</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">selection-background-color: rgb(132, 132, 132);</string>
+    </property>
+    <property name="value">
+     <number>0</number>
+    </property>
+   </widget>
+   <widget class="QPlainTextEdit" name="logView1">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>234</y>
+      <width>420</width>
+      <height>125</height>
+     </rect>
+    </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+    <property name="backgroundVisible">
+     <bool>false</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_6">
+    <property name="geometry">
+     <rect>
+      <x>142</x>
+      <y>36</y>
+      <width>207</width>
+      <height>17</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">font: 600 12pt &quot;Noto Sans&quot;;</string>
+    </property>
+    <property name="text">
+     <string>and install dependencies.</string>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="mirrorLineEdit">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>202</y>
+      <width>420</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Sans Serif</family>
+      <pointsize>9</pointsize>
+     </font>
+    </property>
+    <property name="cursor">
+     <cursorShape>PointingHandCursor</cursorShape>
+    </property>
+    <property name="text">
+     <string>https://mirror.csclub.uwaterloo.ca/archlinux/</string>
+    </property>
+    <property name="placeholderText">
+     <string>You have the option to add an Arch Linux mirroe URL here.</string>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QWizardPage" name="partitionPage">
+   <widget class="QTreeWidget" name="treePartitions">
+    <property name="geometry">
+     <rect>
+      <x>32</x>
+      <y>58</y>
+      <width>420</width>
+      <height>125</height>
+     </rect>
+    </property>
+    <property name="minimumSize">
+     <size>
+      <width>420</width>
+      <height>0</height>
+     </size>
+    </property>
+    <column>
+     <property name="text">
+      <string>Name</string>
+     </property>
+    </column>
+    <column>
+     <property name="text">
+      <string>Size</string>
+     </property>
+    </column>
+    <column>
+     <property name="text">
+      <string>Type</string>
+     </property>
+    </column>
+    <column>
+     <property name="text">
+      <string>Mount</string>
+     </property>
+    </column>
+   </widget>
+   <widget class="QPushButton" name="partRefreshButton">
+    <property name="geometry">
+     <rect>
+      <x>318</x>
+      <y>322</y>
+      <width>80</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Refresh</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="createPartButton">
+    <property name="geometry">
+     <rect>
+      <x>404</x>
+      <y>322</y>
+      <width>80</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>EFI Grub</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_5">
+    <property name="geometry">
+     <rect>
+      <x>164</x>
+      <y>6</y>
+      <width>150</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">font: 600 12pt &quot;Noto Sans&quot;;</string>
+    </property>
+    <property name="text">
+     <string>Drive Preparation</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignmentFlag::AlignCenter</set>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_2">
+    <property name="geometry">
+     <rect>
+      <x>32</x>
+      <y>30</y>
+      <width>420</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">font: 600 10pt &quot;Noto Sans&quot;;</string>
+    </property>
+    <property name="text">
+     <string>Install to free space, existing partition, or wipe the entire drive.</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignmentFlag::AlignCenter</set>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="driveDropdown">
+    <property name="geometry">
+     <rect>
+      <x>0</x>
+      <y>322</y>
+      <width>110</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <item>
+     <property name="text">
+      <string>Select a Drive</string>
+     </property>
+    </item>
+   </widget>
+   <widget class="QPushButton" name="prepareButton">
+    <property name="geometry">
+     <rect>
+      <x>232</x>
+      <y>322</y>
+      <width>80</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Bios Grub</string>
+    </property>
+   </widget>
+   <widget class="QPlainTextEdit" name="logView2">
+    <property name="geometry">
+     <rect>
+      <x>32</x>
+      <y>186</y>
+      <width>420</width>
+      <height>125</height>
+     </rect>
+    </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="comboInstallMode">
+    <property name="geometry">
+     <rect>
+      <x>116</x>
+      <y>322</y>
+      <width>110</width>
+      <height>30</height>
+     </rect>
+    </property>
+    <item>
+     <property name="text">
+      <string>Use free space</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Use selected partition</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Erase entire drive</string>
+     </property>
+    </item>
+   </widget>
+  </widget>
+  <widget class="QWizardPage" name="wizardPage_3">
+   <widget class="QPushButton" name="installButton">
+    <property name="geometry">
+     <rect>
+      <x>200</x>
+      <y>172</y>
+      <width>80</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Submit</string>
+    </property>
+   </widget>
+   <widget class="QPlainTextEdit" name="logWidget3">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>210</y>
+      <width>420</width>
+      <height>150</height>
+     </rect>
+    </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="comboDesktopEnvironment">
+    <property name="geometry">
+     <rect>
+      <x>308</x>
+      <y>44</y>
+      <width>125</width>
+      <height>25</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_4">
+    <property name="geometry">
+     <rect>
+      <x>304</x>
+      <y>16</y>
+      <width>132</width>
+      <height>21</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Noto Serif</family>
+      <pointsize>11</pointsize>
+      <bold>true</bold>
+     </font>
+    </property>
+    <property name="text">
+     <string>Choose a desktop</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_3">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>12</y>
+      <width>219</width>
+      <height>27</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Noto Serif</family>
+      <pointsize>11</pointsize>
+      <bold>true</bold>
+     </font>
+    </property>
+    <property name="text">
+     <string>Add user and set passwords</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="labelUsername">
+    <property name="geometry">
+     <rect>
+      <x>68</x>
+      <y>46</y>
+      <width>65</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Username:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="labelPassword">
+    <property name="geometry">
+     <rect>
+      <x>72</x>
+      <y>70</y>
+      <width>58</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Password:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="labelAgain">
+    <property name="geometry">
+     <rect>
+      <x>94</x>
+      <y>92</y>
+      <width>36</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Again:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="labelRootPassword">
+    <property name="geometry">
+     <rect>
+      <x>42</x>
+      <y>116</y>
+      <width>87</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Root Password:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="labelRootPasswordAgain">
+    <property name="geometry">
+     <rect>
+      <x>92</x>
+      <y>138</y>
+      <width>36</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Again:</string>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEditUsername">
+    <property name="geometry">
+     <rect>
+      <x>136</x>
+      <y>42</y>
+      <width>125</width>
+      <height>25</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEditPassword">
+    <property name="geometry">
+     <rect>
+      <x>136</x>
+      <y>64</y>
+      <width>125</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="echoMode">
+     <enum>QLineEdit::EchoMode::Password</enum>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEditPasswordAgain">
+    <property name="geometry">
+     <rect>
+      <x>136</x>
+      <y>88</y>
+      <width>125</width>
+      <height>24</height>
+     </rect>
+    </property>
+    <property name="echoMode">
+     <enum>QLineEdit::EchoMode::Password</enum>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEditRootPassword">
+    <property name="geometry">
+     <rect>
+      <x>136</x>
+      <y>110</y>
+      <width>125</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="echoMode">
+     <enum>QLineEdit::EchoMode::Password</enum>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEditRootPasswordAgain">
+    <property name="geometry">
+     <rect>
+      <x>136</x>
+      <y>134</y>
+      <width>125</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="echoMode">
+     <enum>QLineEdit::EchoMode::Password</enum>
+    </property>
+   </widget>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
