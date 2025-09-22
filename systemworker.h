@@ -46,6 +46,8 @@ private:
     bool useEfi = false;
     bool generateGrubWithOsProber();
     bool runCommand(const QString &cmd);
+    bool ensureTargetMounts();
+    static bool isMountPoint(const QString &path);
 };
 
 #endif // SYSTEMWORKER_H
