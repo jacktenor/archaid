@@ -6,6 +6,14 @@
 #include <QStringList>
 #include <QCoreApplication>
 #include <QRegularExpression>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QJsonValue>
+#include <QSet>
+#include <functional>
+#include <utility>
 
 SystemWorker::SystemWorker(QObject *parent) : QObject(parent) {}
 
@@ -35,6 +43,186 @@ QString SystemWorker::normalizePartitionPath(const QString &in) const
         s.prepend("/dev/");
     // Nothing else to do here; lsblk/parted already give canonical names.
     return s;
+}
+
+bool SystemWorker::isMountPoint(const QString &path)
+{
+    QProcess proc;
+    proc.start("findmnt", {"-rn", path});
+    if (!proc.waitForFinished(-1))
+        return false;
+    return proc.exitCode() == 0;
+}
+
+bool SystemWorker::ensureTargetMounts()
+{
+    const QString disk = drive.startsWith("/dev/") ? drive : QStringLiteral("/dev/%1").arg(drive);
+    if (disk.size() <= 5) {
+        emit errorOccurred("Invalid target drive specified for installation.");
+        return false;
+    }
+
+    QDir().mkpath("/mnt");
+    if (isMountPoint("/mnt")) {
+        if (useEfi) {
+            QDir().mkpath("/mnt/boot/efi");
+            if (!isMountPoint("/mnt/boot/efi")) {
+                emit logMessage("/mnt already mounted; ensuring ESP is mounted as well…");
+            } else {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    } else {
+        emit logMessage("Target root is not mounted. Attempting to locate and mount it automatically…");
+    }
+
+    QString out;
+    if (!runCommandCapture(
+            QStringLiteral("lsblk -J -b -o NAME,TYPE,FSTYPE,SIZE,PARTFLAGS,MOUNTPOINT %1").arg(disk),
+            &out))
+        return false;
+
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(out.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        emit errorOccurred(QStringLiteral("Failed to parse lsblk output for %1: %2")
+                               .arg(disk, parseError.errorString()));
+        return false;
+    }
+
+    const QJsonArray devices = doc.object().value(QStringLiteral("blockdevices")).toArray();
+    if (devices.isEmpty()) {
+        emit errorOccurred(QStringLiteral("No block devices found in lsblk output for %1.").arg(disk));
+        return false;
+    }
+
+    struct PartitionInfo {
+        QString name;
+        QString fstype;
+        QString flags;
+        QString mountpoint;
+        qulonglong size = 0;
+    };
+
+    QList<PartitionInfo> partitions;
+    std::function<void(const QJsonObject &)> walk = [&](const QJsonObject &obj) {
+        const QString type = obj.value(QStringLiteral("type")).toString();
+        const QString name = obj.value(QStringLiteral("name")).toString();
+        const QString fstype = obj.value(QStringLiteral("fstype")).toString();
+        const QString flags = obj.value(QStringLiteral("partflags")).toString();
+        const QString mountpoint = obj.value(QStringLiteral("mountpoint")).toString();
+        const qulonglong size = obj.value(QStringLiteral("size")).toVariant().toULongLong();
+
+        if (type == QLatin1String("part") && !name.isEmpty()) {
+            PartitionInfo p;
+            p.name = name;
+            p.fstype = fstype;
+            p.flags = flags;
+            p.mountpoint = mountpoint;
+            p.size = size;
+            partitions.append(p);
+        }
+
+        const QJsonArray children = obj.value(QStringLiteral("children")).toArray();
+        for (const QJsonValue &childVal : children) {
+            if (childVal.isObject())
+                walk(childVal.toObject());
+        }
+    };
+
+    for (const QJsonValue &val : devices) {
+        if (val.isObject())
+            walk(val.toObject());
+    }
+
+    if (partitions.isEmpty()) {
+        emit errorOccurred(QStringLiteral("No partitions detected on %1.").arg(disk));
+        return false;
+    }
+
+    auto hasFlag = [](const QString &flags, const QString &needle) {
+        return flags.contains(needle, Qt::CaseInsensitive);
+    };
+
+    const QSet<QString> rootFsTypes = {"ext4", "btrfs", "xfs", "f2fs", "jfs", "reiserfs"};
+    PartitionInfo rootCandidate;
+    for (const PartitionInfo &p : std::as_const(partitions)) {
+        const QString fs = p.fstype.toLower();
+        if (!rootFsTypes.contains(fs))
+            continue;
+        if (hasFlag(p.flags, QStringLiteral("esp")) || hasFlag(p.flags, QStringLiteral("bios_grub")))
+            continue;
+        if (rootCandidate.name.isEmpty() || p.size > rootCandidate.size)
+            rootCandidate = p;
+    }
+
+    if (rootCandidate.name.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Unable to determine target root partition on %1.").arg(disk));
+        return false;
+    }
+
+    const QString rootDev = rootCandidate.name.startsWith("/dev/")
+                                ? rootCandidate.name
+                                : QStringLiteral("/dev/%1").arg(rootCandidate.name);
+
+    if (!isMountPoint("/mnt")) {
+        emit logMessage(QStringLiteral("Mounting %1 at /mnt…").arg(rootDev));
+        if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) {
+            emit errorOccurred(QStringLiteral("Failed to mount %1 at /mnt.").arg(rootDev));
+            return false;
+        }
+    }
+
+    if (!isMountPoint("/mnt")) {
+        emit errorOccurred("/mnt is not a valid mountpoint even after attempting to mount the root partition.");
+        return false;
+    }
+
+    if (!useEfi) {
+        return true;
+    }
+
+    QDir().mkpath("/mnt/boot/efi");
+    if (isMountPoint("/mnt/boot/efi"))
+        return true;
+
+    PartitionInfo espCandidate;
+    for (const PartitionInfo &p : std::as_const(partitions)) {
+        const QString flags = p.flags;
+        const QString fs = p.fstype.toLower();
+        const bool looksEsp = hasFlag(flags, QStringLiteral("esp")) || fs == "vfat" || fs == "fat32" || fs == "fat";
+        if (!looksEsp)
+            continue;
+        if (espCandidate.name.isEmpty() || hasFlag(flags, QStringLiteral("esp")) || p.size < espCandidate.size) {
+            espCandidate = p;
+            if (hasFlag(flags, QStringLiteral("esp")))
+                break; // prefer explicitly flagged ESPs
+        }
+    }
+
+    if (espCandidate.name.isEmpty()) {
+        emit errorOccurred(QStringLiteral("EFI installation requested, but no EFI System Partition was found on %1.").arg(disk));
+        return false;
+    }
+
+    const QString espDev = espCandidate.name.startsWith("/dev/")
+                               ? espCandidate.name
+                               : QStringLiteral("/dev/%1").arg(espCandidate.name);
+
+    emit logMessage(QStringLiteral("Mounting EFI System Partition %1 at /mnt/boot/efi…").arg(espDev));
+    if (QProcess::execute("sudo", {"mount", espDev, "/mnt/boot/efi"}) != 0) {
+        emit errorOccurred(QStringLiteral("Failed to mount EFI System Partition %1 at /mnt/boot/efi.").arg(espDev));
+        return false;
+    }
+
+    if (!isMountPoint("/mnt/boot/efi")) {
+        emit errorOccurred("/mnt/boot/efi is not mounted after attempting to attach the EFI System Partition.");
+        return false;
+    }
+
+    return true;
 }
 
 void SystemWorker::setParameters(const QString &drv,
@@ -462,6 +650,9 @@ bool SystemWorker::generateGrubWithOsProber()
 void SystemWorker::run() {
     emit logMessage("\xF0\x9F\x9A\x80 Starting system installation...");
 
+    if (!ensureTargetMounts())
+        return;
+
     QString isoPath = "/mnt/archlinux.iso";
     if (!QFile::exists(isoPath)) {
         QString tmpIso = QDir::tempPath() + "/archlinux.iso";
@@ -490,6 +681,14 @@ void SystemWorker::run() {
     runCommand("sudo rm -f /mnt/etc/resolv.conf");
     runCommand("sudo cp /etc/resolv.conf /mnt/etc/resolv.conf");
 
+    runCommand(
+        "sudo arch-chroot /mnt bash -lc \"set -e; "
+        "for d in /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; do "
+        "  if [ -L \\\"$d\\\" ] || { [ -e \\\"$d\\\" ] && [ ! -d \\\"$d\\\" ]; }; then rm -rf \\\"$d\\\"; fi; "
+        "done; "
+        "mkdir -p /var/cache/pacman/pkg /var/lib/pacman/sync; "
+        "chown root:root /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; "
+        "chmod 0755 /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync;\"");
     // Ensure pacman cache and database directories are real directories on the
     // target filesystem (the live ISO uses tmpfs-backed symlinks which break
     // pacman's space checks once copied over).
