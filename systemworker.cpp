@@ -490,6 +490,21 @@ void SystemWorker::run() {
     runCommand("sudo rm -f /mnt/etc/resolv.conf");
     runCommand("sudo cp /etc/resolv.conf /mnt/etc/resolv.conf");
 
+    // Ensure pacman cache and database directories are real directories on the
+    // target filesystem (the live ISO uses tmpfs-backed symlinks which break
+    // pacman's space checks once copied over).
+    if (!runCommand(
+            "sudo arch-chroot /mnt bash -lc \""
+            "set -e;"
+            "for d in /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; do "
+            "  if [ -L \\\"$d\\\" ] || { [ -e \\\"$d\\\" ] && [ ! -d \\\"$d\\\" ]; }; then rm -rf \\\"$d\\\"; fi; "
+            "done;"
+            "mkdir -p /var/cache/pacman/pkg /var/lib/pacman/sync;"
+            "chown root:root /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync;"
+            "chmod 0755 /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync;"
+            "\""))
+        return;
+
     if (!QFile::exists("/mnt/usr/bin/pacman")) {
     QString mirrorUrl = customMirrorUrl;
         QString bootstrapUrl;

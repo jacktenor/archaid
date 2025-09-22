@@ -155,6 +155,8 @@ static QString findExistingBiosGrub(const QString &partedBin, const QString &dev
             const int idx = number.toInt(&ok);
             if (ok)
                 return partitionNodeFor(base, idx);
+
+            return partitionNodeFor(base, number.toInt());
         }
     }
 
@@ -767,6 +769,12 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
 
             emit logMessage("Mounting root partition...");
             if (QProcess::execute("sudo", {"mount", rootDev, "/mnt"}) != 0) { emit errorOccurred("Failed to mount root at /mnt."); return; }
+
+            emit installComplete();
+            return;
+        }
+
+
 
             emit installComplete();
             return;
