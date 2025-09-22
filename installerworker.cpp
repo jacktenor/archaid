@@ -183,6 +183,7 @@ static QString findExistingBiosGrub(const QString &partedBin, const QString &dev
                 return partitionNodeFor(base, idx);
 
 
+
             return partitionNodeFor(base, number.toInt());
         }
     }
@@ -781,6 +782,26 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
         const QString existingBios = findExistingBiosGrub(partedBin, devPath);
         if (!existingBios.isEmpty()) {
             emit logMessage(QString("Found existing bios_grub partition: %1").arg(existingBios));
+
+            const QSet<QString> before = childPartitionsSet(devPath);
+
+            const QString rootStart = QString::number(startMiB) + "MiB";
+            const QString rootEnd   = QString::number(endMiB - 1) + "MiB";
+            if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", "ext4", rootStart, rootEnd}) != 0) {
+                emit errorOccurred("Failed to create root (existing partition).");
+                return;
+            }
+            QProcess::execute("sudo", {"partprobe", devPath});
+            QProcess::execute("sudo", {"udevadm", "settle"});
+            QThread::sleep(1);
+
+            const QString rootDev = detectNewPartitionNode(devPath, before);
+            if (rootDev.isEmpty()) { emit errorOccurred("Could not uniquely detect new root partition."); return; }
+
+            if (QProcess::execute("sudo", {"mkfs.ext4", "-F", rootDev}) != 0) { emit errorOccurred("Failed to format root."); return; }
+            QProcess::execute("sudo", {"e2fsck", "-f", rootDev});
+
+
 
             const QSet<QString> before = childPartitionsSet(devPath);
 

@@ -12,6 +12,7 @@
 #include <QJsonParseError>
 #include <QJsonValue>
 #include <QSet>
+#include <QFileInfo>
 #include <QFileInfo
 #include <functional>
 #include <utility>
@@ -487,6 +488,7 @@ bool SystemWorker::ensureTargetMounts()
     return true;
 }
 
+
     return true;
 }
 
@@ -725,6 +727,16 @@ bool SystemWorker::runCommandCapture(const QString &command, QString *output)
 }
 
 bool SystemWorker::runCommand(const QString &cmd) {
+    // Ensure the target root (and ESP when applicable) are mounted before any
+    // arch-chroot invocation. Some earlier steps (like ISO extraction) may
+    // leave /mnt in an unmounted state on certain hosts, which confused pacman
+    // into thinking there was no free disk space. Guard each chrooted call so
+    // we always operate on the real target filesystem.
+    if (cmd.contains(QStringLiteral("arch-chroot /mnt"))) {
+        if (!ensureTargetMounts())
+            return false;
+    }
+
     // Stream stdout/stderr in real-time to avoid "big dump at the end".
     QProcess proc;
 
@@ -954,6 +966,7 @@ void SystemWorker::run() {
         "mkdir -p /var/cache/pacman/pkg /var/lib/pacman/sync; "
         "chown root:root /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync; "
         "chmod 0755 /var/cache/pacman /var/cache/pacman/pkg /var/lib/pacman /var/lib/pacman/sync;\"");
+
 
     // Ensure pacman cache and database directories are real directories on the
     // target filesystem (the live ISO uses tmpfs-backed symlinks which break
