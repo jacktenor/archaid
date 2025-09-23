@@ -159,6 +159,12 @@ static QString findExistingEsp(const QString &partedBin, const QString &devPath)
 // Returns full /dev/… path or empty string if none is present.
 static QString findExistingBiosGrub(const QString &partedBin, const QString &devPath)
 {
+    QProcess process;
+    process.start("sudo", QStringList{partedBin, devPath, "-m", "unit", "MiB", "print"});
+    process.waitForFinished();
+
+    const QStringList lines = QString(process.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+    const QString base = devPath.startsWith("/dev/") ? devPath.mid(5) : devPath;
     QProcess p;
     p.start("sudo", QStringList{partedBin, devPath, "-m", "unit", "MiB", "print"});
     p.waitForFinished();
@@ -172,6 +178,20 @@ static QString findExistingBiosGrub(const QString &partedBin, const QString &dev
             continue;
 
         const QString number = cols.at(0);
+        if (number.isEmpty() || !number.at(0).isDigit())
+            continue;
+
+        const QString flags = cols.at(6).toLower();
+        if (!flags.contains("bios_grub"))
+            continue;
+
+        bool ok = false;
+        const int partNum = number.toInt(&ok);
+        if (!ok)
+            continue;
+
+        return partitionNodeFor(base, partNum);
+
         if (number.isEmpty() || !number[0].isDigit())
             continue;
 
@@ -779,6 +799,52 @@ void InstallerWorker::recreateFromSelectedPartition(QProcess &process, const QSt
         return;
 
     } else {
+        // Legacy/BIOS: ensure a bios_grub slice exists, then recreate root.
+        QString rootStartMiBStr = QString::number(startMiB) + "MiB";
+        const QString rootEndMiBStr   = QString::number(endMiB - 1) + "MiB";
+
+        const QString existingBios = findExistingBiosGrub(partedBin, devPath);
+        if (!existingBios.isEmpty()) {
+            emit logMessage(QString("Reusing existing bios_grub partition: %1").arg(existingBios));
+        } else {
+            const long long biosEndMiB = startMiB + 2; // ~2MiB bios_grub slice
+            if (biosEndMiB >= endMiB) {
+                emit errorOccurred("Selected partition is too small to host bios_grub and root partitions.");
+                return;
+            }
+
+            const QString biosStartStr = QString::number(startMiB) + "MiB";
+            const QString biosEndStr   = QString::number(biosEndMiB) + "MiB";
+            const QSet<QString> beforeBios = childPartitionsSet(devPath);
+            if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", biosStartStr, biosEndStr}) != 0) {
+                emit errorOccurred("Failed to create bios_grub partition.");
+                return;
+            }
+            QProcess::execute("sudo", {"partprobe", devPath});
+            QProcess::execute("sudo", {"udevadm", "settle"});
+            QThread::sleep(1);
+
+            const QString biosPart = detectNewPartitionNode(devPath, beforeBios);
+            if (biosPart.isEmpty()) {
+                emit errorOccurred("Could not detect newly created bios_grub partition.");
+                return;
+            }
+            const QString biosNum = partitionNumberFromPath(biosPart);
+            if (biosNum.isEmpty()) {
+                emit errorOccurred("Could not determine bios_grub partition number.");
+                return;
+            }
+            if (QProcess::execute("sudo", {partedBin, devPath, "--script", "set", biosNum, "bios_grub", "on"}) != 0) {
+                emit errorOccurred("Failed to set bios_grub flag.");
+                return;
+            }
+            emit logMessage(QString("Created bios_grub partition: %1").arg(biosPart));
+
+            rootStartMiBStr = QString::number(biosEndMiB) + "MiB";
+        }
+
+        const QSet<QString> before = childPartitionsSet(devPath);
+        if (QProcess::execute("sudo", {partedBin, devPath, "--script", "mkpart", "primary", "ext4", rootStartMiBStr, rootEndMiBStr}) != 0) {
         const QString existingBios = findExistingBiosGrub(partedBin, devPath);
         if (!existingBios.isEmpty()) {
             emit logMessage(QString("Found existing bios_grub partition: %1").arg(existingBios));
